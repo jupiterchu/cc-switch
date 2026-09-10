@@ -4,10 +4,10 @@ This is a community build of [CC Switch](https://github.com/farion1231/cc-switch
 
 ## Downloads and installation
 
-The first compatibility revision uses tag `aigocode-v3.20.0-1` and keeps application version `3.20.0`.
+The first compatibility revision is based on the stable upstream `v3.20.2` release (database schema 18), uses tag `aigocode-v3.20.2-1`, and keeps application version `3.20.2`. It supports databases already upgraded by upstream 3.20.2 without downgrading their schema.
 
-- Windows x64: `CC-Switch-aigocode-v3.20.0-1-Windows-x64.msi`. Close CC Switch and run the MSI. The installer does not have an Authenticode signature.
-- macOS 12 or later, Intel and Apple Silicon: `CC-Switch-aigocode-v3.20.0-1-macOS-universal.zip`. Close CC Switch, extract the app, and move it to Applications. The app has an ad-hoc signature and is **not Apple notarized**. macOS may require approval in System Settings > Privacy & Security before opening it.
+- Windows x64: `CC-Switch-aigocode-v3.20.2-1-Windows-x64.msi`. Close CC Switch and run the MSI. The installer does not have an Authenticode signature.
+- macOS 12 or later, Intel and Apple Silicon: `CC-Switch-aigocode-v3.20.2-1-macOS-universal.zip`. Close CC Switch, extract the app, and move it to Applications. The app has an ad-hoc signature and is **not Apple notarized**. macOS may require approval in System Settings > Privacy & Security before opening it.
 - Verify downloads against the accompanying `SHA256SUMS.txt`. The original MIT license and this document are included in the application resources and release assets.
 
 The application name, identifier `com.ccswitch.desktop`, and `ccswitch://` URL scheme are retained for an in-place replacement. This is not a separate side-by-side installation. Existing settings and the CC Switch database are reused; back up data with the existing application before replacing it. The Windows installer already allows same-version upgrades. Installing an upstream package later can replace the compatibility patch.
@@ -22,7 +22,7 @@ A future automatic update channel would need this fork's own signing key and pub
 
 ## Build and draft release
 
-Use the `AIGoCode compatibility build` workflow in `jupiterchu/cc-switch`. It is triggered only with `workflow_dispatch`; its `tag` input defaults to `aigocode-v3.20.0-1`. The tag must match the application version and end in a positive revision number. This tag prefix does not match the upstream release workflow's `v*` trigger.
+Use the `AIGoCode compatibility build` workflow in `jupiterchu/cc-switch`. It is triggered only with `workflow_dispatch`; its `tag` input defaults to `aigocode-v3.20.2-1`. The tag must match the application version and end in a positive revision number. This tag prefix does not match the upstream release workflow's `v*` trigger.
 
 The workflow builds the exact dispatched commit on Windows and macOS, uploads both artifacts, computes checksums, and creates a **draft prerelease**. It does not publish the release. The workflow refuses to build in the upstream repository and refuses to reuse a tag pointing to a different commit. An existing release is not overwritten; use a new revision for changed artifacts.
 
@@ -43,6 +43,8 @@ pnpm tauri build --config src-tauri/tauri.aigocode.conf.json --target x86_64-pc-
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm tauri build --config src-tauri/tauri.aigocode.conf.json --target universal-apple-darwin --bundles app
 ```
+
+Rust registry and compilation dependencies are cached separately by operating system, architecture, toolchain, and dependency/configuration hashes. Installer bundles and signing credentials are not cached.
 
 No Apple, Windows, Tauri updater, or R2 signing credentials are required by this workflow. GitHub's automatically supplied token needs `contents: write` only in the draft-release job. The original release workflow cannot be reused without its Tauri signing key and Apple signing/notarization credentials.
 

@@ -309,6 +309,9 @@ fn deeplink_import_codex_rejects_invalid_options_without_persisting_or_echoing_k
         json!({ "config": format!("{prefix}http_headers = {{ 'invalid name' = 'value' }}") }),
         json!({ "config": format!("{prefix}http_headers = {{ 'x-relay' = \"bad\\r\\nheader\" }}") }),
         json!({ "config": "model_provider = 'missing'\n[model_providers.custom]" }),
+        json!({ "config": "model_provider = 'oss'" }),
+        json!({ "config": "model_provider = 'ollama-chat'" }),
+        json!({ "config": "model_provider = 'OpenAI'" }),
         json!({ "config": "experimental_bearer_token = 'sk-never-echo'\ninvalid = [" }),
         json!({ "config": { "requires_openai_auth": false } }),
         json!(null),
@@ -342,10 +345,9 @@ fn deeplink_import_codex_builtin_providers_do_not_require_explicit_tables() {
     for builtin in [
         "openai",
         "amazon-bedrock",
+        "amazon-bedrock-runtime",
         "ollama",
         "lmstudio",
-        "oss",
-        "ollama-chat",
     ] {
         let url = codex_config_deeplink(
             json!({

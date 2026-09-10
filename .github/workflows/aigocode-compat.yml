@@ -6,7 +6,7 @@ on:
       tag:
         description: "Compatibility release tag (aigocode-v<app version>-<revision>)"
         required: true
-        default: aigocode-v3.20.0-1
+        default: aigocode-v3.20.2-1
         type: string
 
 permissions:
@@ -70,6 +70,22 @@ jobs:
       - name: Add macOS targets
         if: runner.os == 'macOS'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target/release/deps
+            src-tauri/target/release/build
+            src-tauri/target/release/.fingerprint
+            src-tauri/target/*/release/deps
+            src-tauri/target/*/release/build
+            src-tauri/target/*/release/.fingerprint
+          key: ${{ runner.os }}-${{ runner.arch }}-aigocode-rust-1.95-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/tauri.aigocode.conf.json') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-aigocode-rust-1.95-
 
       - name: Setup pnpm
         env:
@@ -166,7 +182,7 @@ jobs:
           cat > release-notes.md <<'EOF'
           AIGoCode compatibility build of [CC Switch](https://github.com/farion1231/cc-switch), distributed under the upstream MIT license.
 
-          This community build includes the AIGoCode provider-import compatibility patch. It retains the CC Switch application identity and replaces an existing installation; close CC Switch before installing.
+          Based on stable CC Switch 3.20.2 (database schema 18), this community build includes the AIGoCode provider-import compatibility patch. It retains the CC Switch application identity and replaces an existing installation; close CC Switch before installing.
 
           - Windows x64: `CC-Switch-$COMPAT_TAG-Windows-x64.msi` (no Authenticode signature).
           - macOS Intel and Apple Silicon: `CC-Switch-$COMPAT_TAG-macOS-universal.zip` (ad-hoc signature, **not Apple notarized**). Extract the app and move it to Applications. macOS may require permission in Privacy & Security.
