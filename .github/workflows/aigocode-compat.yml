@@ -142,7 +142,7 @@ jobs:
           test -d "$app"
           codesign --verify --deep --strict "$app"
           codesign --display --verbose=2 "$app" 2>&1 | grep -F 'Signature=adhoc'
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/cc-switch"
+          lipo "$app/Contents/MacOS/cc-switch" -verify_arch arm64 x86_64
           mkdir -p release-assets
           ditto -c -k --sequesterRsrc --keepParent "$app" "release-assets/CC-Switch-$COMPAT_TAG-macOS-universal.zip"
 
