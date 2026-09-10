@@ -62,6 +62,11 @@ jobs:
           assert.equal(compat.bundle.createUpdaterArtifacts, false);
           assert.equal(compat.bundle.macOS.signingIdentity, "-");
           assert.deepEqual(compat.plugins.updater.endpoints, []);
+          const windows = JSON.parse(fs.readFileSync("src-tauri/tauri.aigocode.windows.conf.json", "utf8"));
+          assert.equal(windows.bundle.createUpdaterArtifacts, false);
+          assert.deepEqual(windows.plugins.updater.endpoints, []);
+          assert.deepEqual(windows.bundle.resources, []);
+          assert.equal(windows.bundle.licenseFile, "../LICENSE");
           NODE
 
       - name: Setup Rust
@@ -71,8 +76,9 @@ jobs:
         if: runner.os == 'macOS'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v5
+      - name: Restore Rust dependencies
+        id: rust-cache
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -83,8 +89,9 @@ jobs:
             src-tauri/target/*/release/deps
             src-tauri/target/*/release/build
             src-tauri/target/*/release/.fingerprint
-          key: ${{ runner.os }}-${{ runner.arch }}-aigocode-rust-1.95-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/tauri.aigocode.conf.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-aigocode-rust-1.95-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/tauri.aigocode*.conf.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-aigocode-rust-1.95-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'src-tauri/tauri.aigocode*.conf.json') }}-
             ${{ runner.os }}-${{ runner.arch }}-aigocode-rust-1.95-
 
       - name: Setup pnpm
@@ -102,7 +109,7 @@ jobs:
 
       - name: Build Windows MSI
         if: runner.os == 'Windows'
-        run: pnpm tauri build --config src-tauri/tauri.aigocode.conf.json --target x86_64-pc-windows-msvc --bundles msi
+        run: pnpm tauri build --verbose --config src-tauri/tauri.aigocode.windows.conf.json --target x86_64-pc-windows-msvc --bundles msi
 
       - name: Test Windows provider import and switching
         if: runner.os == 'Windows'
@@ -142,9 +149,41 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: aigocode-compat-${{ matrix.platform }}
+          overwrite: true
           path: release-assets/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload Windows packaging diagnostics on failure
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: aigocode-windows-packaging-diagnostics
+          overwrite: true
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/cc-switch.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/wix/**/*.wxs
+            src-tauri/target/x86_64-pc-windows-msvc/release/wix/**/*.wxl
+            src-tauri/target/x86_64-pc-windows-msvc/release/wix/**/*.wixobj
+            src-tauri/target/x86_64-pc-windows-msvc/release/wix/**/*.rtf
+            src-tauri/target/x86_64-pc-windows-msvc/release/wix/**/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Save Rust dependencies after success or failure
+        if: "!cancelled() && steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-primary-key != ''"
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target/release/deps
+            src-tauri/target/release/build
+            src-tauri/target/release/.fingerprint
+            src-tauri/target/*/release/deps
+            src-tauri/target/*/release/build
+            src-tauri/target/*/release/.fingerprint
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   draft-release:
     name: Create draft compatibility release

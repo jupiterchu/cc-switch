@@ -8,7 +8,7 @@ The first compatibility revision is based on the stable upstream `v3.20.2` relea
 
 - Windows x64: `CC-Switch-aigocode-v3.20.2-1-Windows-x64.msi`. Close CC Switch and run the MSI. The installer does not have an Authenticode signature.
 - macOS 12 or later, Intel and Apple Silicon: `CC-Switch-aigocode-v3.20.2-1-macOS-universal.zip`. Close CC Switch, extract the app, and move it to Applications. The app has an ad-hoc signature and is **not Apple notarized**. macOS may require approval in System Settings > Privacy & Security before opening it.
-- Verify downloads against the accompanying `SHA256SUMS.txt`. The original MIT license and this document are included in the application resources and release assets.
+- Verify downloads against the accompanying `SHA256SUMS.txt`. The original MIT license is embedded in the Windows MSI license page; Tauri converts the repository LICENSE text to RTF during bundling. On macOS, the original MIT license and this document are included in the application resources. Both are also included as release assets.
 
 The application name, identifier `com.ccswitch.desktop`, and `ccswitch://` URL scheme are retained for an in-place replacement. This is not a separate side-by-side installation. Existing settings and the CC Switch database are reused; back up data with the existing application before replacing it. The Windows installer already allows same-version upgrades. Installing an upstream package later can replace the compatibility patch.
 
@@ -29,7 +29,7 @@ The workflow builds the exact dispatched commit on Windows and macOS, uploads bo
 Build inputs:
 
 - Node.js 22, pnpm from `packageManager`, Rust 1.95.0.
-- `src-tauri/tauri.aigocode.conf.json` merged over the ordinary platform configuration.
+- macOS: `src-tauri/tauri.aigocode.conf.json`; Windows: `src-tauri/tauri.aigocode.windows.conf.json`. Each compatibility overlay is merged over the ordinary platform configuration. The Windows overlay retains the upstream per-user MSI template, uses `licenseFile`, and excludes generic resource components that would need their own per-user registry key paths.
 - Frontend: `VITE_AIGOCODE_COMPAT=1` and `VITE_AIGOCODE_RELEASES_URL=https://github.com/jupiterchu/cc-switch/releases`.
 - Rust: `AIGOCODE_COMPAT_BUILD=1` and `AIGOCODE_RELEASES_URL=https://github.com/jupiterchu/cc-switch/releases`.
 
@@ -38,13 +38,13 @@ For local builds, set the same four environment variables before running:
 ```sh
 pnpm install --frozen-lockfile
 # On Windows x64:
-pnpm tauri build --config src-tauri/tauri.aigocode.conf.json --target x86_64-pc-windows-msvc --bundles msi
+pnpm tauri build --verbose --config src-tauri/tauri.aigocode.windows.conf.json --target x86_64-pc-windows-msvc --bundles msi
 # On macOS, after installing both Rust targets:
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm tauri build --config src-tauri/tauri.aigocode.conf.json --target universal-apple-darwin --bundles app
 ```
 
-Rust registry and compilation dependencies are cached separately by operating system, architecture, toolchain, and dependency/configuration hashes. Installer bundles and signing credentials are not cached.
+Rust registry and compilation dependencies are cached separately by operating system, architecture, toolchain, and dependency/configuration hashes. Restore and save are separate steps: a failed build still saves reusable compilation work, and each run attempt writes a new immutable cache key. Installer bundles and signing credentials are not cached. If Windows packaging fails, a separate diagnostic artifact contains only generated WiX inputs/logs and the compiled application executable; it is not a reviewed installer release.
 
 No Apple, Windows, Tauri updater, or R2 signing credentials are required by this workflow. GitHub's automatically supplied token needs `contents: write` only in the draft-release job. The original release workflow cannot be reused without its Tauri signing key and Apple signing/notarization credentials.
 
