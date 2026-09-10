@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import type { UpdateInfo } from "../lib/updater";
 import { checkForUpdate } from "../lib/updater";
+import { IS_AIGOCODE_COMPAT } from "../lib/distribution";
 
 interface UpdateContextValue {
   // 更新状态
@@ -117,6 +118,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
 
   // 应用启动时自动检查更新
   useEffect(() => {
+    if (IS_AIGOCODE_COMPAT) return;
     // 延迟1秒后检查，避免影响启动体验
     const timer = setTimeout(() => {
       checkUpdate().catch(console.error);

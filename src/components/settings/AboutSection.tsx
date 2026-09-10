@@ -40,6 +40,7 @@ import type { AppId } from "@/lib/api/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isWindows } from "@/lib/platform";
 import { isUpdateAvailable } from "@/lib/version";
+import { IS_AIGOCODE_COMPAT, RELEASES_URL } from "@/lib/distribution";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
 
@@ -445,16 +446,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           ? `v${targetVersion}`
           : "";
 
-      if (!displayVersion) {
-        await settingsApi.openExternal(
-          "https://github.com/farion1231/cc-switch/releases",
-        );
+      if (IS_AIGOCODE_COMPAT || !displayVersion) {
+        await settingsApi.openExternal(RELEASES_URL);
         return;
       }
 
-      await settingsApi.openExternal(
-        `https://github.com/farion1231/cc-switch/releases/tag/${displayVersion}`,
-      );
+      await settingsApi.openExternal(`${RELEASES_URL}/tag/${displayVersion}`);
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
       toast.error(t("settings.openReleaseNotesFailed"));
@@ -462,6 +459,19 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   }, [t, updateInfo?.availableVersion, version]);
 
   const handleCheckUpdate = useCallback(async () => {
+    if (IS_AIGOCODE_COMPAT) {
+      try {
+        await settingsApi.checkUpdates();
+      } catch (error) {
+        console.error(
+          "[AboutSection] Failed to open compatibility releases",
+          error,
+        );
+        toast.error(t("settings.checkUpdateFailed"));
+      }
+      return;
+    }
+
     if (hasUpdate) {
       if (isPortable) {
         try {

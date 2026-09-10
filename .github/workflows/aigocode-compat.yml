@@ -1,0 +1,200 @@
+name: AIGoCode compatibility build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Compatibility release tag (aigocode-v<app version>-<revision>)"
+        required: true
+        default: aigocode-v3.20.0-1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aigocode-compat-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'jupiterchu/cc-switch'
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: Windows-x64
+            target: x86_64-pc-windows-msvc
+          - os: macos-14
+            platform: macOS-universal
+            target: universal-apple-darwin
+    env:
+      COMPAT_TAG: ${{ inputs.tag }}
+      VITE_AIGOCODE_COMPAT: "1"
+      AIGOCODE_COMPAT_BUILD: "1"
+      VITE_AIGOCODE_RELEASES_URL: https://github.com/${{ github.repository }}/releases
+      AIGOCODE_RELEASES_URL: https://github.com/${{ github.repository }}/releases
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Validate compatibility configuration and tag
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import assert from "node:assert/strict";
+          const base = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+          const compat = JSON.parse(fs.readFileSync("src-tauri/tauri.aigocode.conf.json", "utf8"));
+          const prefix = "aigocode-v" + base.version + "-";
+          assert(process.env.COMPAT_TAG.startsWith(prefix), "Tag must match the app version");
+          assert(/^[1-9][0-9]*$/.test(process.env.COMPAT_TAG.slice(prefix.length)), "Revision must be a positive integer");
+          assert.equal(compat.bundle.createUpdaterArtifacts, false);
+          assert.equal(compat.bundle.macOS.signingIdentity, "-");
+          assert.deepEqual(compat.plugins.updater.endpoints, []);
+          NODE
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check frontend types
+        run: pnpm typecheck
+
+      - name: Build Windows MSI
+        if: runner.os == 'Windows'
+        run: pnpm tauri build --config src-tauri/tauri.aigocode.conf.json --target x86_64-pc-windows-msvc --bundles msi
+
+      - name: Test Windows provider import and switching
+        if: runner.os == 'Windows'
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --test deeplink_import
+
+      - name: Collect Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi')
+          if ($installers.Count -ne 1) { throw "Expected exactly one Windows MSI" }
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Copy-Item $installers[0].FullName "release-assets/CC-Switch-$env:COMPAT_TAG-Windows-x64.msi"
+
+      - name: Build macOS universal application
+        if: runner.os == 'macOS'
+        run: pnpm tauri build --config src-tauri/tauri.aigocode.conf.json --target universal-apple-darwin --bundles app
+
+      - name: Test macOS provider import and switching
+        if: runner.os == 'macOS'
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin --test deeplink_import
+
+      - name: Verify and package macOS application
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/universal-apple-darwin/release/bundle/macos/CC Switch.app"
+          test -d "$app"
+          codesign --verify --deep --strict "$app"
+          codesign --display --verbose=2 "$app" 2>&1 | grep -F 'Signature=adhoc'
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/cc-switch"
+          mkdir -p release-assets
+          ditto -c -k --sequesterRsrc --keepParent "$app" "release-assets/CC-Switch-$COMPAT_TAG-macOS-universal.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: aigocode-compat-${{ matrix.platform }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    name: Create draft compatibility release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COMPAT_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: aigocode-compat-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Prepare checksums and release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "release-assets/CC-Switch-$COMPAT_TAG-Windows-x64.msi"
+          test -f "release-assets/CC-Switch-$COMPAT_TAG-macOS-universal.zip"
+          cp LICENSE release-assets/LICENSE.txt
+          cp docs/aigocode-compat.md release-assets/AIGOCODE-COMPAT.md
+          (
+            cd release-assets
+            sha256sum -- *.msi *.zip LICENSE.txt AIGOCODE-COMPAT.md > SHA256SUMS.txt
+          )
+          cat > release-notes.md <<'EOF'
+          AIGoCode compatibility build of [CC Switch](https://github.com/farion1231/cc-switch), distributed under the upstream MIT license.
+
+          This community build includes the AIGoCode provider-import compatibility patch. It retains the CC Switch application identity and replaces an existing installation; close CC Switch before installing.
+
+          - Windows x64: `CC-Switch-$COMPAT_TAG-Windows-x64.msi` (no Authenticode signature).
+          - macOS Intel and Apple Silicon: `CC-Switch-$COMPAT_TAG-macOS-universal.zip` (ad-hoc signature, **not Apple notarized**). Extract the app and move it to Applications. macOS may require permission in Privacy & Security.
+          - Automatic application updates are disabled in this build. Download future compatibility builds from this repository's Releases page.
+          - Source commit: `$GITHUB_SHA`. Installation details and limitations are in `AIGOCODE-COMPAT.md`; checksums are in `SHA256SUMS.txt`.
+
+          This is a draft for review. Verify both installers and provider import before publishing it.
+          EOF
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          path = Path("release-notes.md")
+          content = path.read_text().replace("$COMPAT_TAG", os.environ["COMPAT_TAG"])
+          path.write_text(content.replace("$GITHUB_SHA", os.environ["GITHUB_SHA"]))
+          PYTHON
+
+      - name: Create draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing_tag_commit="$(git rev-parse --verify "refs/tags/$COMPAT_TAG^{commit}" 2>/dev/null || true)"
+          if [ -n "$existing_tag_commit" ] && [ "$existing_tag_commit" != "$GITHUB_SHA" ]; then
+            echo "::error::The release tag already points to another commit."
+            exit 1
+          fi
+          gh release create "$COMPAT_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "CC Switch AIGoCode compatibility $COMPAT_TAG" \
+            --notes-file release-notes.md \
+            --draft --prerelease

@@ -146,7 +146,7 @@ pub(crate) fn build_provider_from_request(
 ) -> Result<Provider, AppError> {
     let settings_config = match app_type {
         AppType::Claude | AppType::ClaudeDesktop => build_claude_settings(request),
-        AppType::Codex => build_codex_settings(request),
+        AppType::Codex => build_codex_settings(request)?,
         AppType::Gemini => build_gemini_settings(request),
         AppType::GrokBuild => build_grokbuild_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
@@ -390,7 +390,14 @@ fn extract_claude_config_env(
 }
 
 /// Build Codex settings configuration
-fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+fn build_codex_settings(request: &DeepLinkImportRequest) -> Result<serde_json::Value, AppError> {
+    let options = match read_config_value(request)? {
+        Some(config) => match parse_codex_toml(&config)? {
+            Some(config) => codex_provider_options(&config)?,
+            None => CodexProviderOptions::default(),
+        },
+        None => CodexProviderOptions::default(),
+    };
     let provider_display_name = request
         .name
         .as_deref()
@@ -438,11 +445,144 @@ requires_openai_auth = true
 "#
     );
 
-    json!({
+    // Keep the established generated config and only copy explicitly supported
+    // provider options. Never import arbitrary TOML (MCP commands, hooks, etc.).
+    let mut config_toml = config_toml;
+    if options.requires_openai_auth.is_some() || options.http_headers.is_some() {
+        let mut document = config_toml
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| AppError::Message("Failed to build Codex config".to_string()))?;
+        if let Some(requires_auth) = options.requires_openai_auth {
+            document["model_providers"]["custom"]["requires_openai_auth"] =
+                toml_edit::value(requires_auth);
+            if !requires_auth {
+                // auth.json alone is not used by providers with OpenAI auth
+                // disabled. Use the merged key, including URL overrides.
+                let api_key = request
+                    .api_key
+                    .as_deref()
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| {
+                        AppError::InvalidInput(
+                            "Codex provider requires an API key when requires_openai_auth is false"
+                                .to_string(),
+                        )
+                    })?;
+                document["model_providers"]["custom"]["experimental_bearer_token"] =
+                    toml_edit::value(api_key);
+            }
+        }
+        if let Some(headers) = options.http_headers {
+            let mut table = toml_edit::InlineTable::new();
+            for (name, value) in headers {
+                table.insert(name, toml_edit::Value::from(value));
+            }
+            document["model_providers"]["custom"]["http_headers"] =
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(table));
+        }
+        config_toml = document.to_string();
+    }
+
+    Ok(json!({
         "auth": {
             "OPENAI_API_KEY": request.api_key,
         },
         "config": config_toml
+    }))
+}
+
+#[derive(Default)]
+struct CodexProviderOptions {
+    requires_openai_auth: Option<bool>,
+    http_headers: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// The JSON envelope contains Codex's TOML as a string. Parse it without
+/// including source text in errors: the document can contain API keys.
+fn parse_codex_toml(config: &serde_json::Value) -> Result<Option<toml::Value>, AppError> {
+    if !config.is_object() {
+        return Err(AppError::InvalidInput(
+            "Codex config envelope must be an object".to_string(),
+        ));
+    }
+    match config.get("config") {
+        None => Ok(None),
+        Some(serde_json::Value::String(value)) => toml::from_str(value)
+            .map(Some)
+            .map_err(|_| AppError::InvalidInput("Invalid Codex config TOML".to_string())),
+        Some(_) => Err(AppError::InvalidInput(
+            "Codex config must be a TOML string".to_string(),
+        )),
+    }
+}
+
+fn codex_active_provider(config: &toml::Value) -> Result<Option<&toml::Value>, AppError> {
+    let Some(selected) = config.get("model_provider") else {
+        // Older config payloads without an explicit provider still support
+        // basic key/endpoint/model extraction, but cannot select extensions.
+        return Ok(None);
+    };
+    let selected = selected.as_str().ok_or_else(|| {
+        AppError::InvalidInput("Codex model_provider must be a string".to_string())
+    })?;
+    match config
+        .get("model_providers")
+        .and_then(|providers| providers.get(selected))
+    {
+        Some(provider) if provider.is_table() => Ok(Some(provider)),
+        None if !selected.trim().is_empty()
+            && !crate::codex_config::is_custom_codex_model_provider_id(selected) =>
+        {
+            // Codex built-ins (for example openai) need no explicit table.
+            Ok(None)
+        }
+        _ => Err(AppError::InvalidInput(
+            "Codex model_provider must reference a provider table".to_string(),
+        )),
+    }
+}
+
+fn codex_provider_options(config: &toml::Value) -> Result<CodexProviderOptions, AppError> {
+    let Some(provider) = codex_active_provider(config)? else {
+        return Ok(CodexProviderOptions::default());
+    };
+    let requires_openai_auth = provider
+        .get("requires_openai_auth")
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                AppError::InvalidInput("Codex requires_openai_auth must be a boolean".to_string())
+            })
+        })
+        .transpose()?;
+    let http_headers = provider
+        .get("http_headers")
+        .map(|value| {
+            let table = value.as_table().ok_or_else(|| {
+                AppError::InvalidInput("Codex http_headers must be a table of strings".to_string())
+            })?;
+            table
+                .iter()
+                .map(|(name, value)| {
+                    let value = value.as_str().ok_or_else(|| {
+                        AppError::InvalidInput(
+                            "Codex http_headers must be a table of strings".to_string(),
+                        )
+                    })?;
+                    if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err()
+                        || reqwest::header::HeaderValue::from_str(value).is_err()
+                    {
+                        return Err(AppError::InvalidInput(
+                            "Invalid Codex HTTP header".to_string(),
+                        ));
+                    }
+                    Ok((name.clone(), value.to_string()))
+                })
+                .collect::<Result<std::collections::BTreeMap<_, _>, AppError>>()
+        })
+        .transpose()?;
+    Ok(CodexProviderOptions {
+        requires_openai_auth,
+        http_headers,
     })
 }
 
@@ -592,15 +732,12 @@ fn build_hermes_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
 // Config Merge Logic
 // =============================================================================
 
-/// Parse and merge configuration from Base64 encoded config or remote URL
-///
-/// Priority: URL params > inline config > remote config
-pub fn parse_and_merge_config(
+fn read_config_value(
     request: &DeepLinkImportRequest,
-) -> Result<DeepLinkImportRequest, AppError> {
-    // If no config provided, return original request
+) -> Result<Option<serde_json::Value>, AppError> {
+    // Decode the envelope used for config extraction and supported extensions.
     if request.config.is_none() && request.config_url.is_none() {
-        return Ok(request.clone());
+        return Ok(None);
     }
 
     // Step 1: Get config content
@@ -615,10 +752,10 @@ pub fn parse_and_merge_config(
             "Remote config URL is not yet supported. Use inline config instead.".to_string(),
         ));
     } else {
-        return Ok(request.clone());
+        return Ok(None);
     };
 
-    // Step 2: Parse config based on format
+    // Parse the envelope based on the declared format.
     let format = request.config_format.as_deref().unwrap_or("json");
     let config_value: serde_json::Value = match format {
         "json" => serde_json::from_str(&config_content)
@@ -635,6 +772,19 @@ pub fn parse_and_merge_config(
                 "Unsupported config format: {format}"
             )))
         }
+    };
+
+    Ok(Some(config_value))
+}
+
+/// Parse and merge configuration from Base64 encoded config or remote URL
+///
+/// Priority: URL params > inline config > remote config
+pub fn parse_and_merge_config(
+    request: &DeepLinkImportRequest,
+) -> Result<DeepLinkImportRequest, AppError> {
+    let Some(config_value) = read_config_value(request)? else {
+        return Ok(request.clone());
     };
 
     // Step 3: Extract values from config based on app type and merge with URL params
@@ -739,6 +889,12 @@ fn merge_codex_config(
     request: &mut DeepLinkImportRequest,
     config: &serde_json::Value,
 ) -> Result<(), AppError> {
+    let config_toml = parse_codex_toml(config)?;
+    // Validate extensions during preview as well as final import.
+    if let Some(document) = &config_toml {
+        codex_provider_options(document)?;
+    }
+
     // Auto-fill API key from auth.OPENAI_API_KEY or Codex mobile-compatible bearer token.
     if request.api_key.as_ref().is_none_or(|s| s.is_empty()) {
         let config_str = config.get("config").and_then(|v| v.as_str());
@@ -749,23 +905,15 @@ fn merge_codex_config(
         }
     }
 
-    // Auto-fill endpoint and model from config string
-    if let Some(config_str) = config.get("config").and_then(|v| v.as_str()) {
-        // Parse TOML config string to extract base_url and model
-        if let Ok(toml_value) = toml::from_str::<toml::Value>(config_str) {
-            // Extract base_url from model_providers section
-            if request.endpoint.as_ref().is_none_or(|s| s.is_empty()) {
-                if let Some(base_url) = extract_codex_base_url(&toml_value) {
-                    request.endpoint = Some(base_url);
-                }
-            }
-
-            // Extract model
-            if request.model.is_none() {
-                if let Some(model) = toml_value.get("model").and_then(|v| v.as_str()) {
-                    request.model = Some(model.to_string());
-                }
-            }
+    if let Some(document) = &config_toml {
+        if request.endpoint.as_ref().is_none_or(|s| s.is_empty()) {
+            request.endpoint = extract_codex_base_url(document);
+        }
+        if request.model.is_none() {
+            request.model = document
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
         }
     }
 
@@ -942,7 +1090,15 @@ fn merge_additive_config(
 
 /// Extract base_url from Codex TOML config
 fn extract_codex_base_url(toml_value: &toml::Value) -> Option<String> {
-    // Try to find base_url in model_providers section
+    if toml_value.get("model_provider").is_some() {
+        return codex_active_provider(toml_value)
+            .ok()
+            .flatten()
+            .and_then(|provider| provider.get("base_url"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+    }
+    // Preserve basic extraction for older payloads without model_provider.
     if let Some(providers) = toml_value.get("model_providers").and_then(|v| v.as_table()) {
         for (_key, provider) in providers.iter() {
             if let Some(base_url) = provider.get("base_url").and_then(|v| v.as_str()) {
@@ -1138,7 +1294,7 @@ mod tests {
             ..Default::default()
         };
 
-        let settings = build_codex_settings(&request);
+        let settings = build_codex_settings(&request).expect("build Codex settings");
         let config_text = settings
             .get("config")
             .and_then(|value| value.as_str())

@@ -2816,7 +2816,30 @@ pub fn write_codex_live_for_provider(
             && !crate::settings::preserve_codex_official_auth_on_switch());
 
     if should_write_auth {
-        write_codex_live_atomic(auth, config_text)
+        // Backfill keeps provider keys in auth.OPENAI_API_KEY. A provider that
+        // explicitly disables OpenAI auth still needs its bearer token in TOML
+        // every time it is selected, even without official-login preservation.
+        let needs_bearer = category != Some("official")
+            && config_text
+                .and_then(|text| text.parse::<toml::Value>().ok())
+                .is_some_and(|config| {
+                    config
+                        .get("model_provider")
+                        .and_then(|value| value.as_str())
+                        .and_then(|selected| config.get("model_providers")?.get(selected))
+                        .and_then(|provider| provider.get("requires_openai_auth"))
+                        .and_then(|value| value.as_bool())
+                        == Some(false)
+                });
+        let prepared_config = if needs_bearer {
+            Some(prepare_codex_provider_live_config(
+                auth,
+                config_text.unwrap_or(""),
+            )?)
+        } else {
+            None
+        };
+        write_codex_live_atomic(auth, prepared_config.as_deref().or(config_text))
     } else {
         let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
         write_codex_live_config_atomic(Some(&live_config))
